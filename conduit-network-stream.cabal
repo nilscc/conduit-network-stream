@@ -1,0 +1,33 @@
+Name:                conduit-network-stream
+Version:             0.1
+
+Synopsis:            network streams with the conduit network protocol
+Description:         network streams with the conduit network protocol
+
+License:             BSD3
+License-file:        LICENSE
+Author:              Nils Schweinsberg <mail@nils.cc>
+Maintainer:          mail@nils.cc
+-- Copyright:           
+
+Category:            Network
+
+Build-type:          Simple
+Cabal-version:       >=1.2
+
+-- Extra-source-files:  
+
+Library
+
+  HS-source-dirs:    src
+  GHC-options:       -O2
+
+  Build-depends:       
+    base == 4.*, bytestring, mtl,
+    resourcet, conduit, network-conduit
+
+  Exposed-modules:
+    Data.Conduit.Network.Stream
+    Data.Conduit.Network.Stream.Exceptions
+  Other-modules:       
+    Data.Conduit.Network.Stream.Header
