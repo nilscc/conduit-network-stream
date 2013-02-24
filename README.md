@@ -16,7 +16,9 @@ A very simple example for an application using conduits would be the "uppercase
 copy" of a text file: The `sourceFile` streams its characters to the `uppercase`
 conduit before all elements are stored to a new file by the `sinkFile` command.
 
-    sourceFile "myfile.txt" $= uppercase $$ sinkFile "mycopy.txt"
+```haskell
+sourceFile "myfile.txt" $= uppercase $$ sinkFile "mycopy.txt"
+```
 
 For more detailed information about conduits, head over to [Michaels
 github](https://github.com/snoyberg/conduit/) and take a look at the [haddock
@@ -34,32 +36,32 @@ Part of the Conduit project is the [network-conduit
 package](http://hackage.haskell.org/package/network-conduit), which provides
 basic functions for streaming binary data over a network connection:
 
-    ```haskell
-    type Application m = AppData m -> m ()
+```haskell
+type Application m = AppData m -> m ()
 
-    appSource :: AppData m -> Source m ByteString
-    appSink   :: AppData m -> Sink ByteString m ()
+appSource :: AppData m -> Source m ByteString
+appSink   :: AppData m -> Sink ByteString m ()
 
-    runTCPServer :: (MonadIO m, MonadBaseControl IO m)
-                 => ServerSettings m -> Application m -> m ()
-    runTCPClient :: (MonadIO m, MonadBaseControl IO m)
-                 => ClientSettings m -> Application m -> m ()
-    ```
+runTCPServer :: (MonadIO m, MonadBaseControl IO m)
+             => ServerSettings m -> Application m -> m ()
+runTCPClient :: (MonadIO m, MonadBaseControl IO m)
+             => ClientSettings m -> Application m -> m ()
+```
 
 For example, you could copy a file over network by using `sourceFile` and
 `appSink` in the client...
 
-    ```haskell
-    runTCPClient (clientSettings ..) $ \appData ->
-        sourceFile "myfile.txt" $$ appSink appData
-    ```
+```haskell
+runTCPClient (clientSettings ..) $ \appData ->
+    sourceFile "myfile.txt" $$ appSink appData
+```
 
 ... and `appSource` with `sinkFile` in the server:
 
-    ```haskell
-    runTCPServer (serverSettings ..) $ \appData ->
-        appSource appData $$ sinkFile "myfile-networkcopy.txt"
-    ```
+```haskell
+runTCPServer (serverSettings ..) $ \appData ->
+    appSource appData $$ sinkFile "myfile-networkcopy.txt"
+```
 
 With this very rudimentary API, it is difficult to distinguish between separate
 `ByteString` packages ("messages"). To solve this problem, the
@@ -67,91 +69,91 @@ With this very rudimentary API, it is difficult to distinguish between separate
 which contains its exact length. This header is designed such that it's not only
 possible to send single `ByteString` packages but also lists of `ByteString`s:
 
-    ```haskell
-    send1    :: (Monad m, Sendable a m)
-             => AppData m -> Source (Stream m) a -> m ()
-    sendList :: (Monad m, Sendable a m)
-             => AppData m -> Source (Stream m) a -> m ()
-    ```
+```haskell
+send1    :: (Monad m, Sendable a m)
+         => AppData m -> Source (Stream m) a -> m ()
+sendList :: (Monad m, Sendable a m)
+         => AppData m -> Source (Stream m) a -> m ()
+```
 
 Using these functions, it is very simple to receive those `ByteString` packages.
 All you have to supply is a `ByteString` sink (Note that these are lazy
 `ByteString`s):
 
-    ```haskell
-    receive :: AppData m
-            -> Sink ByteString (Stream m) b
-            -> m (ResumableSource (Stream m) ByteString, b)
-    ```
+```haskell
+receive :: AppData m
+        -> Sink ByteString (Stream m) b
+        -> m (ResumableSource (Stream m) ByteString, b)
+```
 
 To avoid two different functions for "fresh" (`AppData m`) and "old"
 (`ResumableSource`) sources I introduced a type class with instances for both:
 
-    ```haskell
-    class Streamable source m where
-          receive :: source
-                  -> Sink ByteString (Stream m) b
-                  -> m (ResumableSource (Stream m) ByteString, b)
+```haskell
+class Streamable source m where
+      receive :: source
+              -> Sink ByteString (Stream m) b
+              -> m (ResumableSource (Stream m) ByteString, b)
 
-    instance Streamable (AppData m)                             m where ...
-    instance Streamable (ResumableSource (Stream m) ByteString) m where ...
-    ```
+instance Streamable (AppData m)                             m where ...
+instance Streamable (ResumableSource (Stream m) ByteString) m where ...
+```
 
 With this function you could then for example define a function which would
 receive [protocol-buffer](http://hackage.haskell.org/package/protocol-buffers)
 messages:
 
-    ```haskell
-    receiveProtoBuff :: (Streamable source m, ReflectDescriptor msg, Wire msg)
-                     => source
-                     -> Sink msg (Stream m) b
-                     -> m (ResumableSource (Stream m) ByteString, b)
-    receiveProtoBuff src sink = receive src $ toMsg =$ sink
-      where
-        toMsg = Data.Conduits.List.mapMaybe $ \bs ->
-                  case messageGet bs of
-                       Right (msg,_) -> Just msg
-                       Left  _       -> Nothing
-    ```
+```haskell
+receiveProtoBuff :: (Streamable source m, ReflectDescriptor msg, Wire msg)
+                 => source
+                 -> Sink msg (Stream m) b
+                 -> m (ResumableSource (Stream m) ByteString, b)
+receiveProtoBuff src sink = receive src $ toMsg =$ sink
+  where
+    toMsg = Data.Conduits.List.mapMaybe $ \bs ->
+              case messageGet bs of
+                   Right (msg,_) -> Just msg
+                   Left  _       -> Nothing
+```
 
 A simple client/server application with this package (and `-XOverloadedStrings`)
 could look like this:
 
-    ```haskell
-    client = runTCPClient myClientSettings $ \appData -> do
+```haskell
+client = runTCPClient myClientSettings $ \appData -> do
 
-        -- send one single `ByteString`
-        send1 appData $
-            Data.Conduit.yield "Hello world!"
+    -- send one single `ByteString`
+    send1 appData $
+        Data.Conduit.yield "Hello world!"
 
-        -- send a `ByteString` list
-        sendList appData $
-            mapM_ Data.Conduit.yield ["This", "is", "a", "list", "of", "words."]
+    -- send a `ByteString` list
+    sendList appData $
+        mapM_ Data.Conduit.yield ["This", "is", "a", "list", "of", "words."]
 
-    server = runTCPServer myServerSettings $ \appData -> do
+server = runTCPServer myServerSettings $ \appData -> do
 
-        (next, bs) <- receive appData $
-            Data.Conduit.List.consume
+    (next, bs) <- receive appData $
+        Data.Conduit.List.consume
 
-        -- print: "Hello world!"
-        liftIO $
-            mapM_ print bs
+    -- print: "Hello world!"
+    liftIO $
+        mapM_ print bs
 
-        (next', bs') <- receive next $
-            Data.Conduit.List.consume
+    (next', bs') <- receive next $
+        Data.Conduit.List.consume
 
-        -- print: "This"
-        --        "is"
-        --        "a"
-        --        "list"
-        --        "of"
-        --        "words."
-        liftIO $
-            mapM_ print bs'
+    -- print: "This"
+    --        "is"
+    --        "a"
+    --        "list"
+    --        "of"
+    --        "words."
+    liftIO $
+        mapM_ print bs'
 
-        -- close the conduit stream
-        close next'
-    ```
+    -- close the conduit stream
+    close next'
+```
 
 Note that `receive` automatically terminates as soon as the end of a list/block
 is reached, without closing the connection. All conduits inside a `receive` will
