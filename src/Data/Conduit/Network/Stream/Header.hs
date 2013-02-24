@@ -107,7 +107,7 @@ listStart = [0, mkMSB 0]
 listEnd   = [1, mkMSB 0]
 
 -- | A decode 'ByteString' sink which returns the current header
-decodeHeader :: Monad m => GLSink BS.ByteString m Header
+decodeHeader :: Monad m => Consumer BS.ByteString m Header
 decodeHeader = go []
  where
   go w8s = do
