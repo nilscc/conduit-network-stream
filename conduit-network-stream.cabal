@@ -1,8 +1,8 @@
 Name:                conduit-network-stream
 Version:             0.1
 
-Synopsis:            network streams with the conduit network protocol
-Description:         network streams with the conduit network protocol
+Synopsis:            A base layer for network protocols using Conduits
+Description:         A base layer for network protocols using Conduits
 
 License:             BSD3
 License-file:        LICENSE
@@ -13,14 +13,19 @@ Maintainer:          mail@nils.cc
 Category:            Network
 
 Build-type:          Simple
-Cabal-version:       >=1.2
+Cabal-version:       >=1.6
 
 -- Extra-source-files:  
+
+source-repository head
+  type:             git
+  location:         git://github.com/mcmaniac/conduit-network-stream.git
+  tag:              0.1
 
 Library
 
   HS-source-dirs:    src
-  GHC-options:       -O2
+  GHC-options:       -Wall
 
   Build-depends:       
     base == 4.*, bytestring >= 0.10, mtl,
