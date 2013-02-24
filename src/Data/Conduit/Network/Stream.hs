@@ -1,18 +1,20 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 module Data.Conduit.Network.Stream
   ( -- * Network streams
     Stream
     -- ** Sending
-  , send1, sendList
+  , Sendable, send1, sendList
     -- ** Receiving
-  , Streamable (receive), next, receiveLast, close
-  --, (~>)
+  , Streamable (receive), receiveLast, close
+    -- ** Manual sending/receiving
+  , next
+  , (~~)
+  , sink1, sinkList, sinkList'
+  --, sinkListStart, sinkListElems, sinkListEnd
   ) where
 
-import Control.Applicative
 import Control.Monad.Trans
 import Control.Monad.Trans.Resource
 import Data.ByteString (ByteString)
@@ -27,62 +29,48 @@ import qualified Data.ByteString.Lazy as BL
 
 import Data.Conduit.Network.Stream.Exceptions
 import Data.Conduit.Network.Stream.Header
-
--- | 'BL.ByteString' stream
-newtype Stream m a = Stream { stream_base :: m a }
-  deriving (Monad, MonadIO, Functor, Applicative)
-
-instance MonadTrans Stream where
-  lift f = Stream f
-
-instance (MonadThrow m) => MonadThrow (Stream m) where
-  monadThrow e = lift $ monadThrow e
-
-instance (MonadResource m, MonadIO m) => MonadResource (Stream m) where
-  liftResourceT t = lift $ liftResourceT t
-
--- | Alias for '(=$)'
---(~>) :: Monad m => Conduit a (Stream m) b -> Sink b (Stream m) c -> Sink a (Stream m) c
---(~>) = (=$)
+import Data.Conduit.Network.Stream.Internal
 
 -- | Lifted version of @($$)@
-($$) :: Monad m => Source (Stream m) a -> Sink a (Stream m) b -> m b
-src $$ sink = stream_base $ src C.$$ sink
+infixr 0 ~~
+(~~) :: Monad m => Source (Stream m) a -> Sink a (Stream m) b -> m b
+src ~~ sink = stream_base $ src C.$$ sink
+
+class Sendable a m where
+  encode :: Conduit a (Stream m) ByteString
+
+instance Monad m => Sendable ByteString m where
+  encode = encodeBS
+
+instance Monad m => Sendable (Int, BL.ByteString) m where
+  encode = encodeLazyBS
 
 -- | Send one single 'ByteString' over the network connection (if there is more
 -- than one 'ByteString' in the pipe it will be discarded)
-send1 :: Monad m => AppData m -> Source (Stream m) ByteString -> m ()
-send1 ad src = src $$ do
-  CL.isolate 1 =$ encodeBS =$ sink
+send1 :: (Monad m, Sendable a m) => AppData m -> Source (Stream m) a -> m ()
+send1 ad src = src ~~ sink1 ad
+
+-- | Send all 'ByteString's in the pipe as a list over the network connection
+sendList :: (Monad m, Sendable a m) => AppData m -> Source (Stream m) a -> m ()
+sendList ad src = src ~~ sinkList ad
+
+sink1 :: (Monad m, Sendable a m) => AppData m -> Sink a (Stream m) ()
+sink1 ad = do
+  CL.isolate 1 =$ encode =$ sink
   CL.sinkNull
  where
   sink = transPipe lift (appSink ad)
 
--- | Send all 'ByteString's in the pipe as a list over the network connection
-sendList :: Monad m => AppData m -> Source (Stream m) ByteString -> m ()
-sendList ad src = src $$ do
-  start    =$ sink
-  encodeBS =$ sink
-  end      =$ sink
- where
-  sink  = transPipe lift (appSink ad)
-  start = yield $ BS.pack listStart
-  end   = yield $ BS.pack listEnd
+sinkList :: (Monad m, Sendable a m) => AppData m -> Sink a (Stream m) ()
+sinkList ad = do
+  sinkListStart ad
+  sinkListElems ad
+  sinkListEnd   ad
 
-encodeBS :: Monad m => Conduit ByteString (Stream m) ByteString 
-encodeBS = awaitForever $ \bs -> do
-  yield $ BS.pack (varint $ BS.length bs)
-  mapM_ yield $ blocks bs
- where
-  blocks bs | BS.null bs = []
-            | otherwise  =
-              let (f,r) = BS.splitAt 4096 bs
-               in f : blocks r
-
-class Streamable a m where
+class Streamable source m where
   -- | Get the next package from a streamable source (calls 'next'
   -- automatically)
-  receive :: a -> Sink BL.ByteString (Stream m) b -> m (ResumableSource (Stream m) ByteString, b)
+  receive :: source -> Sink BL.ByteString (Stream m) b -> m (ResumableSource (Stream m) ByteString, b)
 
 instance MonadResource m => Streamable (AppData m) m where
   receive ad sink = stream_base $
@@ -121,9 +109,31 @@ next = do
        _          -> monadThrow $ UnexpectedHeader h
  where
   single l = CB.take l >>= yield
+
   list = do
     h <- decodeHeader
     case h of
          VarInt l -> single l >> list
          ListEND  -> return ()
          _        -> monadThrow $ UnexpectedHeader h
+
+-- | Send multiple sinks in the same list
+sinkList'
+  :: (Monad m, Sendable a m)
+  => AppData m
+  -> (Sink a (Stream m) () -> Sink b (Stream m) c)
+  -> Sink b (Stream m) c
+sinkList' ad f = do
+  sinkListStart ad
+  b <- f (sinkListElems ad)
+  sinkListEnd ad
+  return b
+
+sinkListStart, sinkListEnd
+  :: Monad m => AppData m -> Sink a (Stream m) ()
+sinkListStart ad = yield (BS.pack listStart) =$ transPipe lift (appSink ad)
+sinkListEnd   ad = yield (BS.pack listEnd)   =$ transPipe lift (appSink ad)
+
+sinkListElems
+  :: (Monad m, Sendable a m) => AppData m -> Sink a (Stream m) ()
+sinkListElems ad = encode =$ transPipe lift (appSink ad)
