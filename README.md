@@ -13,7 +13,7 @@ anything read- or writeable, for example a file, a network connection or simply
 modify stream elements.
 
 A very simple example for an application using conduits would be the "uppercase
-copy" of a text file: The `sourceFile` streams its `Char`s to the `uppercase`
+copy" of a text file: The `sourceFile` streams its characters to the `uppercase`
 conduit before all elements are stored to a new file by the `sinkFile` command.
 
     sourceFile "myfile.txt" $= uppercase $$ sinkFile "mycopy.txt"
@@ -34,6 +34,7 @@ Part of the Conduit project is the [network-conduit
 package](http://hackage.haskell.org/package/network-conduit), which provides
 basic functions for streaming binary data over a network connection:
 
+    ```haskell
     type Application m = AppData m -> m ()
 
     appSource :: AppData m -> Source m ByteString
@@ -43,17 +44,22 @@ basic functions for streaming binary data over a network connection:
                  => ServerSettings m -> Application m -> m ()
     runTCPClient :: (MonadIO m, MonadBaseControl IO m)
                  => ClientSettings m -> Application m -> m ()
+    ```
 
 For example, you could copy a file over network by using `sourceFile` and
 `appSink` in the client...
 
+    ```haskell
     runTCPClient (clientSettings ..) $ \appData ->
         sourceFile "myfile.txt" $$ appSink appData
+    ```
 
 ... and `appSource` with `sinkFile` in the server:
 
+    ```haskell
     runTCPServer (serverSettings ..) $ \appData ->
         appSource appData $$ sinkFile "myfile-networkcopy.txt"
+    ```
 
 With this very rudimentary API, it is difficult to distinguish between separate
 `ByteString` packages ("messages"). To solve this problem, the
@@ -61,22 +67,27 @@ With this very rudimentary API, it is difficult to distinguish between separate
 which contains its exact length. This header is designed such that it's not only
 possible to send single `ByteString` packages but also lists of `ByteString`s:
 
+    ```haskell
     send1    :: (Monad m, Sendable a m)
              => AppData m -> Source (Stream m) a -> m ()
     sendList :: (Monad m, Sendable a m)
              => AppData m -> Source (Stream m) a -> m ()
+    ```
 
 Using these functions, it is very simple to receive those `ByteString` packages.
 All you have to supply is a `ByteString` sink (Note that these are lazy
 `ByteString`s):
 
+    ```haskell
     receive :: AppData m
             -> Sink ByteString (Stream m) b
             -> m (ResumableSource (Stream m) ByteString, b)
+    ```
 
 To avoid two different functions for "fresh" (`AppData m`) and "old"
 (`ResumableSource`) sources I introduced a type class with instances for both:
 
+    ```haskell
     class Streamable source m where
           receive :: source
                   -> Sink ByteString (Stream m) b
@@ -84,10 +95,29 @@ To avoid two different functions for "fresh" (`AppData m`) and "old"
 
     instance Streamable (AppData m)                             m where ...
     instance Streamable (ResumableSource (Stream m) ByteString) m where ...
+    ```
+
+With this function you could then for example define a function which would
+receive [protocol-buffer](http://hackage.haskell.org/package/protocol-buffers)
+messages:
+
+    ```haskell
+    receiveProtoBuff :: (Streamable source m, ReflectDescriptor msg, Wire msg)
+                     => source
+                     -> Sink msg (Stream m) b
+                     -> m (ResumableSource (Stream m) ByteString, b)
+    receiveProtoBuff src sink = receive src $ toMsg =$ sink
+      where
+        toMsg = Data.Conduits.List.mapMaybe $ \bs ->
+                  case messageGet bs of
+                       Right (msg,_) -> Just msg
+                       Left  _       -> Nothing
+    ```
 
 A simple client/server application with this package (and `-XOverloadedStrings`)
 could look like this:
 
+    ```haskell
     client = runTCPClient myClientSettings $ \appData -> do
 
         -- send one single `ByteString`
@@ -121,6 +151,7 @@ could look like this:
 
         -- close the conduit stream
         close next'
+    ```
 
 Note that `receive` automatically terminates as soon as the end of a list/block
 is reached, without closing the connection. All conduits inside a `receive` will
