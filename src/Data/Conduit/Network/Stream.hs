@@ -1,11 +1,12 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleInstances #-}
 
+-- |
 module Data.Conduit.Network.Stream
   ( -- * Network streams
     StreamData, toStreamData, closeStream
     -- ** Sending
-  , Sendable(..), send
+  , Sendable(..), EncodedBS, send
     -- ** Receiving
   , Receivable(..), receive
     -- ** Bi-directional conversations
@@ -39,7 +40,7 @@ sinkCondEnd   sd = yield (BS.pack condEnd)   =$ streamDataSink sd
 sinkCondElems
   :: (Monad m, Sendable m a)
   => StreamData m -> Sink a m ()
-sinkCondElems sd = encode =$ streamDataSink sd
+sinkCondElems sd = encode =$ CL.map (\(EncodedBS bs) -> bs) =$ streamDataSink sd
 
 toStreamData :: MonadResource n => AppData m -> n (StreamData m)
 toStreamData ad = do
@@ -93,20 +94,23 @@ receive sd sink = do
 --------------------------------------------------------------------------------
 -- Sending data
 
+-- | Newtype for properly encoded bytestrings.
+newtype EncodedBS = EncodedBS ByteString
+
 class Sendable m a where
   -- | `encode` is called before sending out conduit block elements. Each
   -- element has to be encoded either as strict `ByteString` or as lazy `BL.ByteString`
   -- with a known length.
-  encode :: Conduit a m ByteString
+  encode :: Conduit a m EncodedBS
 
 -- | Instance for strict bytestrings, using a specialized version of `encode`.
 instance Monad m => Sendable m ByteString where
-  encode = encodeBS
+  encode = encodeBS =$= CL.map EncodedBS
 
 -- | Instance for lazy bytestrings with a known length, using a specialized
 -- version of `encode`.
 instance Monad m => Sendable m (Int, BL.ByteString) where
-  encode = encodeLazyBS
+  encode = encodeLazyBS =$= CL.map EncodedBS
 
 -- | Instance for lazy bytestrings which calculates the length of the
 -- `BL.ByteString` before calling the @(Int, Data.ByteString.Lazy.ByteString)@
@@ -117,7 +121,7 @@ instance Monad m => Sendable m BL.ByteString where
     len :: BL.ByteString -> Int
     len bs = fromIntegral $ BL.length bs
 
--- | Send one conduit block
+-- | Send one conduit block.
 send :: (Monad m, Sendable m a) => StreamData m -> Source m a -> m ()
 send sd src = src C.$$ streamSink sd
 
