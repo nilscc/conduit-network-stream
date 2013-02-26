@@ -12,6 +12,7 @@ import Data.Conduit.Network.Stream.Header
 
 data StreamException
   = UnexpectedHeader Header
+  | ClosedStream
   deriving (Show, Typeable)
 
 instance Exception StreamException

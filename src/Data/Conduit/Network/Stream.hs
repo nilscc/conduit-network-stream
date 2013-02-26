@@ -3,19 +3,18 @@
 
 module Data.Conduit.Network.Stream
   ( -- * Network streams
-    Stream
+    StreamData, toStreamData, closeStream
     -- ** Sending
-  , Sendable, send1, sendList
+  , Sendable(..), send
     -- ** Receiving
-  , Streamable (receive), receiveLast, close
-    -- ** Manual sending/receiving
-  , next
-  , (~~)
-  , sink1, sinkList, sinkList'
-  --, sinkListStart, sinkListElems, sinkListEnd
+  , Receivable(..), receive
+    -- ** Bi-directional conversations
+  , streamSink
+  , withElementSink
   ) where
 
-import Control.Monad.Trans
+import Control.Concurrent.MVar
+import Control.Monad.Reader
 import Control.Monad.Trans.Resource
 import Data.ByteString (ByteString)
 import Data.Conduit hiding (($$))
@@ -23,7 +22,7 @@ import Data.Conduit.Network
 
 import qualified Data.Conduit         as C 
 import qualified Data.Conduit.List    as CL
-import qualified Data.Conduit.Binary  as CB
+import qualified Data.Conduit.Internal as CI
 import qualified Data.ByteString      as BS
 import qualified Data.ByteString.Lazy as BL
 
@@ -31,109 +30,132 @@ import Data.Conduit.Network.Stream.Exceptions
 import Data.Conduit.Network.Stream.Header
 import Data.Conduit.Network.Stream.Internal
 
--- | Lifted version of @($$)@
-infixr 0 ~~
-(~~) :: Monad m => Source (Stream m) a -> Sink a (Stream m) b -> m b
-src ~~ sink = stream_base $ src C.$$ sink
+sinkCondStart, sinkCondEnd
+  :: Monad m
+  => StreamData m -> Sink a m ()
+sinkCondStart sd = yield (BS.pack condStart) =$ streamDataSink sd
+sinkCondEnd   sd = yield (BS.pack condEnd)   =$ streamDataSink sd
 
-class Sendable a m where
-  encode :: Conduit a (Stream m) ByteString
+sinkCondElems
+  :: (Monad m, Sendable m a)
+  => StreamData m -> Sink a m ()
+sinkCondElems sd = encode =$ streamDataSink sd
 
-instance Monad m => Sendable ByteString m where
+toStreamData :: MonadResource n => AppData m -> n (StreamData m)
+toStreamData ad = do
+  src <- liftIO $ newMVar (NewSource ad)
+  let sd = StreamData src (appSink ad)
+  --register $ closeStream sd
+  return sd
+
+-- | Close current stream. In order to guarantee process resource finalization,
+-- you /must/ use this operator after using `receive`.
+closeStream
+  :: MonadResource m
+  => StreamData m
+  -> m ()
+closeStream sd = do
+  src <- liftIO $ takeMVar (streamDataSource sd)
+  case src of
+       OpenSource s -> s $$+- return ()
+       _            -> return ()
+
+--------------------------------------------------------------------------------
+-- Receiving data
+
+class Receivable a m where
+  -- | `decode` is used after receiving the individual conduit block elements.
+  decode :: Conduit BL.ByteString m a
+
+-- | Instance for strict bytestrings. Note that this uses `BL.toStrict` for the
+-- conversion, which is rather expensive. Try to use lazy bytestrings if
+-- possible.
+instance Monad m => Receivable ByteString m where
+  decode = CL.map BL.toStrict
+
+-- | For lazy bytestrings, `decode` is the identity conduit.
+instance Monad m => Receivable BL.ByteString m where
+  decode = CI.ConduitM $ CI.idP
+
+-- | Receive the next conduit block. Might fail with `ClosedStream` if used on a
+-- closed stream.
+receive :: (MonadResource m, Receivable a m) => StreamData m -> Sink a m b -> m b
+receive sd sink = do
+  -- get current source (and block MVar, just in case)
+  src <- liftIO $ takeMVar (streamDataSource sd)
+  (next,a) <- case src of
+    NewSource ad    -> appSource ad $$+  decodeCondBlock =$= decode =$ sink
+    OpenSource rsrc -> rsrc         $$++ decodeCondBlock =$= decode =$  sink
+    ClosedSource    -> monadThrow $ ClosedStream
+  liftIO $ putMVar (streamDataSource sd) (OpenSource next)
+  return a
+
+--------------------------------------------------------------------------------
+-- Sending data
+
+class Sendable m a where
+  -- | `encode` is called before sending out conduit block elements. Each
+  -- element has to be encoded either as strict `ByteString` or as lazy `BL.ByteString`
+  -- with a known length.
+  encode :: Conduit a m ByteString
+
+-- | Instance for strict bytestrings, using a specialized version of `encode`.
+instance Monad m => Sendable m ByteString where
   encode = encodeBS
 
-instance Monad m => Sendable (Int, BL.ByteString) m where
+-- | Instance for lazy bytestrings with a known length, using a specialized
+-- version of `encode`.
+instance Monad m => Sendable m (Int, BL.ByteString) where
   encode = encodeLazyBS
 
--- | Send one single 'ByteString' over the network connection (if there is more
--- than one 'ByteString' in the pipe it will be discarded)
-send1 :: (Monad m, Sendable a m) => AppData m -> Source (Stream m) a -> m ()
-send1 ad src = src ~~ sink1 ad
+-- | Instance for lazy bytestrings which calculates the length of the
+-- `BL.ByteString` before calling the @(Int, Data.ByteString.Lazy.ByteString)@
+-- instance of `Sendable`.
+instance Monad m => Sendable m BL.ByteString where
+  encode = CL.map (\bs -> (len bs, bs)) =$= encode
+   where
+    len :: BL.ByteString -> Int
+    len bs = fromIntegral $ BL.length bs
 
--- | Send all 'ByteString's in the pipe as a list over the network connection
-sendList :: (Monad m, Sendable a m) => AppData m -> Source (Stream m) a -> m ()
-sendList ad src = src ~~ sinkList ad
+-- | Send one conduit block
+send :: (Monad m, Sendable m a) => StreamData m -> Source m a -> m ()
+send sd src = src C.$$ streamSink sd
 
-sink1 :: (Monad m, Sendable a m) => AppData m -> Sink a (Stream m) ()
-sink1 ad = do
-  CL.isolate 1 =$ encode =$ sink
-  CL.sinkNull
- where
-  sink = transPipe lift (appSink ad)
 
-sinkList :: (Monad m, Sendable a m) => AppData m -> Sink a (Stream m) ()
-sinkList ad = do
-  sinkListStart ad
-  sinkListElems ad
-  sinkListEnd   ad
+--------------------------------------------------------------------------------
+-- Bi-directional conversations
 
-class Streamable source m where
-  -- | Get the next package from a streamable source (calls 'next'
-  -- automatically)
-  receive :: source -> Sink BL.ByteString (Stream m) b -> m (ResumableSource (Stream m) ByteString, b)
+-- | For bi-directional conversations you sometimes need the sink of the current
+-- stream, since you can't use `send` within another `receive`.
+--
+-- A simple example:
+--
+-- > receive streamData $
+-- >     myConduit =$ streamSink streamData
+--
+-- Note, that each `streamSink` marks its own conduit block. If you want to sink
+-- single block elements, use `withElementSink` instead.
+streamSink
+  :: (Monad m, Sendable m a)
+  => StreamData m
+  -> Sink a m ()
+streamSink sd = do
+  sinkCondStart sd
+  sinkCondElems sd
+  sinkCondEnd   sd
 
-instance MonadResource m => Streamable (AppData m) m where
-  receive ad sink = stream_base $
-    transPipe lift (appSource ad) $$+ next =$ sink
-
-instance MonadResource m => Streamable (ResumableSource (Stream m) ByteString) m where
-  receive src sink = stream_base $
-    src $$++ next =$ sink
-
--- | Get the next package from the stream and close the source afterwards
-receiveLast
-  :: MonadResource m
-  => ResumableSource (Stream m) ByteString
-  -> Sink BL.ByteString (Stream m) a
-  -> m a
-receiveLast src sink = stream_base $
-  src $$+- next =$ sink
-
--- | Close a resumable source
-close
-  :: MonadResource m
-  => ResumableSource (Stream m) ByteString
-  -> m ()
-close src = stream_base $
-  src $$+- return ()
-
--- | Get the next package from the stream (whether it's a single 'BL.ByteString' or
--- a list)
-next :: MonadResource m => Conduit ByteString (Stream m) BL.ByteString
-next = do
-  h <- decodeHeader
-  case h of
-       VarInt l     -> single l
-       ConduitSTART -> list
-       EndOfInput   -> return ()
-       _            -> monadThrow $ UnexpectedHeader h
- where
-  single l = CB.take l >>= yield
-
-  list = do
-    h <- decodeHeader
-    case h of
-         VarInt l   -> single l >> list
-         ConduitEND -> return ()
-         _          -> monadThrow $ UnexpectedHeader h
-
--- | Send multiple sinks in the same list
-sinkList'
-  :: (Monad m, Sendable a m)
-  => AppData m
-  -> (Sink a (Stream m) () -> Sink b (Stream m) c)
-  -> Sink b (Stream m) c
-sinkList' ad f = do
-  sinkListStart ad
-  b <- f (sinkListElems ad)
-  sinkListEnd ad
-  return b
-
-sinkListStart, sinkListEnd
-  :: Monad m => AppData m -> Sink a (Stream m) ()
-sinkListStart ad = yield (BS.pack condStart) =$ transPipe lift (appSink ad)
-sinkListEnd   ad = yield (BS.pack condEnd)   =$ transPipe lift (appSink ad)
-
-sinkListElems
-  :: (Monad m, Sendable a m) => AppData m -> Sink a (Stream m) ()
-sinkListElems ad = encode =$ transPipe lift (appSink ad)
+-- | Sink single elements inside the same conduit block. Example:
+--
+-- > receive streamData $ withElementSink $ \sinkElem -> do
+-- >     yield singleElem =$ sinkElem
+-- >     mapM_ yield moreElems =$ sinkElem
+withElementSink
+  :: (Monad m, Sendable m a)
+  => StreamData m
+  -> (Sink a m () -> Sink b m c)
+  -> Sink b m c
+withElementSink sd run = do
+  sinkCondStart sd
+  res <- run (sinkCondElems sd)
+  sinkCondEnd   sd
+  return res

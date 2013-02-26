@@ -1,5 +1,5 @@
 Name:                conduit-network-stream
-Version:             0.1
+Version:             0.2
 
 Synopsis:            A base layer for network protocols using Conduits
 Description:         A base layer for network protocols using Conduits
@@ -20,7 +20,6 @@ Cabal-version:       >=1.6
 source-repository head
   type:             git
   location:         git://github.com/mcmaniac/conduit-network-stream.git
-  tag:              0.1
 
 Library
 
