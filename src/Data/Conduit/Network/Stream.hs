@@ -1,14 +1,70 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleInstances #-}
 
--- |
+{- |
+
+Module      :  Data.Conduit.Network.Stream
+Copyright   :  Nils Schweinsberg
+License     :  BSD-style
+
+Maintainer  :  Nils Schweinsberg <mail@nils.cc>
+Stability   :  experimental
+
+
+Easy to use network streaming with conduits. This library properly encodes
+conduit blocks over a network connection such that
+
+ - each `await` corresponds to exactly one `yield` and
+
+ - each `receive` corresponds to exactly one `send`.
+
+It also supports sending and receiving of custom data types via the
+`Sendable` and `Receivable` instances.
+
+A simple server/client example (using @-XOverloadedStrings@):
+
+> import           Control.Monad.Trans
+> import qualified Data.ByteString             as Strict
+> import qualified Data.ByteString.Lazy        as Lazy
+> import           Data.Conduit
+> import qualified Data.Conduit.List           as CL
+> import           Data.Conduit.Network
+> import           Data.Conduit.Network.Stream
+>
+> client :: IO ()
+> client = runResourceT $ runTCPClient (clientSettings ..) $ \appData -> do       
+>
+>     streamData <- toStreamData appData
+>
+>     send streamData $ mapM_ yield (["ab", "cd", "ef"] :: [Strict.ByteString])
+>     send streamData $ mapM_ yield (["123", "456"]     :: [Strict.ByteString])
+>
+>     closeStream streamData
+>
+> server :: IO ()
+> server = runResourceT $ runTCPServer (serverSettings ..) $ \appData -> do
+>
+>     streamData <- toStreamData appData
+>
+>     bs  <- receive streamData $ CL.consume
+>     liftIO $ print (bs  :: [Lazy.ByteString])
+>
+>     bs' <- receive streamData $ CL.consume
+>     liftIO $ print (bs' :: [Lazy.ByteString])
+> 
+>     closeStream streamData
+
+-}
+
 module Data.Conduit.Network.Stream
   ( -- * Network streams
     StreamData, toStreamData, closeStream
     -- ** Sending
-  , Sendable(..), EncodedBS, send
+  , send
+  , Sendable(..), EncodedBS
     -- ** Receiving
-  , Receivable(..), receive
+  , receive
+  , Receivable(..)
     -- ** Bi-directional conversations
   , streamSink
   , withElementSink
@@ -64,13 +120,15 @@ closeStream sd = do
 --------------------------------------------------------------------------------
 -- Receiving data
 
+-- | `decode` is used after receiving the individual conduit block elements.
+-- It is therefore not necessary to reuse other `decode` instances (in
+-- contrast to `Sendable` instance definitions).
 class Receivable a m where
-  -- | `decode` is used after receiving the individual conduit block elements.
   decode :: Conduit BL.ByteString m a
 
 -- | Instance for strict bytestrings. Note that this uses `BL.toStrict` for the
--- conversion, which is rather expensive. Try to use lazy bytestrings if
--- possible.
+-- conversion from lazy bytestrings, which is rather expensive. Try to use lazy
+-- bytestrings if possible.
 instance Monad m => Receivable ByteString m where
   decode = CL.map BL.toStrict
 
@@ -78,8 +136,8 @@ instance Monad m => Receivable ByteString m where
 instance Monad m => Receivable BL.ByteString m where
   decode = CI.ConduitM $ CI.idP
 
--- | Receive the next conduit block. Might fail with `ClosedStream` if used on a
--- closed stream.
+-- | Receive the next conduit block. Might fail with the `ClosedStream`
+-- exception if used on a stream that has been closed by `closeStream`.
 receive :: (MonadResource m, Receivable a m) => StreamData m -> Sink a m b -> m b
 receive sd sink = do
   -- get current source (and block MVar, just in case)
@@ -97,6 +155,11 @@ receive sd sink = do
 -- | Newtype for properly encoded bytestrings.
 newtype EncodedBS = EncodedBS ByteString
 
+-- | To define your own `Sendable` instances, reuse the instances for strict and
+-- lazy bytestrings, for example for "Data.Text":
+--
+-- > instance (Monad m, Sendable m Data.ByteString.ByteString) => Sendable m Text where
+-- >     encode = Data.Conduit.List.map encodeUtf8 =$= encode
 class Sendable m a where
   -- | `encode` is called before sending out conduit block elements. Each
   -- element has to be encoded either as strict `ByteString` or as lazy `BL.ByteString`
