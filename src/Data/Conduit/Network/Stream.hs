@@ -103,19 +103,19 @@ next :: MonadResource m => Conduit ByteString (Stream m) BL.ByteString
 next = do
   h <- decodeHeader
   case h of
-       VarInt l   -> single l
-       ListSTART  -> list
-       EndOfInput -> return ()
-       _          -> monadThrow $ UnexpectedHeader h
+       VarInt l     -> single l
+       ConduitSTART -> list
+       EndOfInput   -> return ()
+       _            -> monadThrow $ UnexpectedHeader h
  where
   single l = CB.take l >>= yield
 
   list = do
     h <- decodeHeader
     case h of
-         VarInt l -> single l >> list
-         ListEND  -> return ()
-         _        -> monadThrow $ UnexpectedHeader h
+         VarInt l   -> single l >> list
+         ConduitEND -> return ()
+         _          -> monadThrow $ UnexpectedHeader h
 
 -- | Send multiple sinks in the same list
 sinkList'
@@ -131,8 +131,8 @@ sinkList' ad f = do
 
 sinkListStart, sinkListEnd
   :: Monad m => AppData m -> Sink a (Stream m) ()
-sinkListStart ad = yield (BS.pack listStart) =$ transPipe lift (appSink ad)
-sinkListEnd   ad = yield (BS.pack listEnd)   =$ transPipe lift (appSink ad)
+sinkListStart ad = yield (BS.pack condStart) =$ transPipe lift (appSink ad)
+sinkListEnd   ad = yield (BS.pack condEnd)   =$ transPipe lift (appSink ad)
 
 sinkListElems
   :: (Monad m, Sendable a m) => AppData m -> Sink a (Stream m) ()

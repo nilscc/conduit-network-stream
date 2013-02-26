@@ -3,8 +3,8 @@
 -- preceded by a binary header of variable length. There are currently 3 types
 -- of headers:
 --
---  * The beginning of a list is encoded as @[0, MSB]@
---  * The end of a list is encoded as @[1, MSB]@
+--  * The beginning of a conduit block is encoded as @[0, MSB]@
+--  * The end of a conduit block is encoded as @[1, MSB]@
 --  * Length definition of the current block, encoded as variable length integer
 --
 -- Each header byte consists of 7 bits + the "most significant bit". For
@@ -35,14 +35,14 @@
 -- > 0000 0000  0000 0000  0000 1001  --  set 8th bit
 -- >         _          _          X
 --
--- Distinction between sepcial headers (such as the start or end of lists) and
--- regular variable length integers is done by checking the most significant
--- (i.e. last) byte. In a variable length integer, the first 7 bits of the MSB
--- are always bigger than 0, while special headers are ended by the byte
--- "00000001":
+-- Distinction between sepcial headers (such as the start or end of conduit
+-- blocks) and regular variable length integers is done by checking the most
+-- significant (i.e. last) byte. In a variable length integer, the first 7 bits
+-- of the MSB are always bigger than 0, while special headers are ended by the
+-- byte "00000001":
 --
--- > 0000 0000  0000 0001  --  special header: list start
--- > 0000 0010  0000 0001  --  special header: list end
+-- > 0000 0000  0000 0001  --  special header: conduit block start
+-- > 0000 0010  0000 0001  --  special header: conduit block end
 -- > 0000 0011             --  block of length 1
 -- > 0000 0101             --  block of length 2
 -- > 0000 1001             --  block of length 4
@@ -63,8 +63,8 @@ import qualified Data.ByteString      as BS
 --import qualified Data.ByteString.Lazy as BL
 
 data Header
-  = ListSTART
-  | ListEND
+  = ConduitSTART
+  | ConduitEND
   | VarInt Int
   | InvalidHeader [Word8]
   | EndOfInput
@@ -102,9 +102,9 @@ fromVarint []    = 0
 fromVarint [x]   = fromIntegral $ x `clearBit` 7
 fromVarint (w:r) = fromIntegral w + shiftL (fromVarint r) 7
 
-listStart, listEnd :: [Word8]
-listStart = [0, mkMSB 0]
-listEnd   = [1, mkMSB 0]
+condStart, condEnd :: [Word8]
+condStart = [0, mkMSB 0]
+condEnd   = [1, mkMSB 0]
 
 -- | A decode 'ByteString' sink which returns the current header
 decodeHeader :: Monad m => Consumer BS.ByteString m Header
@@ -119,15 +119,15 @@ decodeHeader = go []
                  | otherwise             -> go   (w8s ++ [w8])
 
   -- special header decoding
-  spec [0] = return ListSTART
-  spec [1] = return ListEND
+  spec [0] = return ConduitSTART
+  spec [1] = return ConduitEND
   spec w8s = return $ InvalidHeader w8s
 
   -- var int decoding
   var  vi  = return $ VarInt (fromVarint vi)
 
 encodeHeader :: Header -> Maybe BS.ByteString
-encodeHeader ListSTART   = Just $ BS.pack listStart
-encodeHeader ListEND     = Just $ BS.pack listEnd
-encodeHeader (VarInt vi) = Just $ BS.pack (varint vi)
-encodeHeader _           = Nothing
+encodeHeader ConduitSTART = Just $ BS.pack condStart
+encodeHeader ConduitEND   = Just $ BS.pack condEnd
+encodeHeader (VarInt vi)  = Just $ BS.pack (varint vi)
+encodeHeader _            = Nothing
