@@ -42,7 +42,7 @@ sinkCondElems
   => StreamData m -> Sink a m ()
 sinkCondElems sd = encode =$ CL.map (\(EncodedBS bs) -> bs) =$ streamDataSink sd
 
-toStreamData :: MonadResource n => AppData m -> n (StreamData m)
+toStreamData :: MonadIO n => AppData m -> n (StreamData m)
 toStreamData ad = do
   src <- liftIO $ newMVar (NewSource ad)
   let sd = StreamData src (appSink ad)
